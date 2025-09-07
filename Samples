@@ -1,0 +1,32 @@
+from antenna_ml import run_reverse_ml_workflow
+
+print("TESTING ML SYSTEM")
+print("=" * 50)
+
+try:
+    print("Loading sample data and training model...")
+    trained_model = run_reverse_ml_workflow("sample_antenna_data.xlsx")
+
+    if trained_model:
+        print("\nTraining successful.")
+
+        # Test prediction
+        print("\nPredicting optimal parameters at 2.5 GHz...")
+        optimal = trained_model.predict_optimal_parameters(-25.0, 2.5, 0.5)
+
+        if optimal:
+            print("Optimal antenna parameters:")
+            print(f"   Iterations: {optimal['num_iterations']:.1f}")
+            print(f"   Max size: {optimal['max_size']:.1f} mm")
+            print(f"   Feedline width: {optimal['feedline_width']:.2f} mm")
+            print(f"   Feedline length: {optimal['feedline_length']:.1f} mm")
+
+            print("\nSuccess. Ready to use with HFSS data.")
+        else:
+            print("Prediction failed.")
+    else:
+        print("Model training failed.")
+
+except Exception as e:
+    print(f"Error: {e}")
+    print("\nIf you see import errors, check that all required packages are installed.")
