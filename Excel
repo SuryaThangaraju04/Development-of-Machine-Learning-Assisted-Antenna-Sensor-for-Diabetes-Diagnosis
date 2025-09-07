@@ -1,0 +1,71 @@
+import pandas as pd
+import numpy as np
+
+print("Creating sample antenna data for testing...")
+
+# Create frequencies from 1 to 8 GHz (100 points)
+frequencies = np.linspace(1, 8, 100)
+
+# Sample antenna configurations with different parameters
+configs = [
+    {'iter': 3, 'size': 20, 'fwidth': 1.5, 'flength': 8},
+    {'iter': 5, 'size': 25, 'fwidth': 2.0, 'flength': 10},
+    {'iter': 4, 'size': 22, 'fwidth': 1.8, 'flength': 9},
+    {'iter': 6, 'size': 28, 'fwidth': 2.2, 'flength': 12},
+    {'iter': 7, 'size': 30, 'fwidth': 2.5, 'flength': 15}
+]
+
+print(f"Creating data for {len(configs)} antenna configurations...")
+
+# Create the data dictionary
+data = {'Frequency_GHz': frequencies}
+
+for i, config in enumerate(configs):
+    # Create column name in the format the ML system expects
+    col_name = f"S11_iter{config['iter']}_size{config['size']}_fwidth{config['fwidth']}_flength{config['flength']}"
+
+    print(f"   Configuration {i + 1}: {col_name}")
+
+    # Generate realistic S11 values with resonances
+    s11_values = []
+    for freq in frequencies:
+        s11 = -5  # Base S11 level
+
+        # Resonance around 2.5 GHz
+        if 2.0 <= freq <= 3.0:
+            resonance_strength = -20 + config['size'] * 0.5
+            s11 += resonance_strength * np.exp(-((freq - 2.5) ** 2) / 0.1)
+
+        # Resonance around 7.5 GHz (dual-band)
+        if 6.5 <= freq <= 8.5:
+            resonance_freq = 7.0 + config['iter'] * 0.1
+            resonance_strength = -15 + config['fwidth'] * 2
+            s11 += resonance_strength * np.exp(-((freq - resonance_freq) ** 2) / 0.2)
+
+        # Add noise
+        s11 += np.random.normal(0, 0.3)
+
+        # Clamp to realistic range
+        s11 = max(s11, -40)
+        s11 = min(s11, -1)
+
+        s11_values.append(s11)
+
+    data[col_name] = s11_values
+
+# Create DataFrame and save to Excel
+df = pd.DataFrame(data)
+df.to_excel('sample_antenna_data.xlsx', index=False)
+
+print("\nFile created: sample_antenna_data.xlsx")
+print("Summary:")
+print(f"   - {len(frequencies)} frequency points (1–8 GHz)")
+print(f"   - {len(configs)} antenna configurations")
+print("   - Includes S11 resonances around 2.5 GHz and 7.5 GHz")
+
+# Show first few rows
+print("\nFirst 5 rows of data:")
+print(df.head())
+
+print("\nColumn format: S11_iter[X]_size[Y]_fwidth[Z]_flength[W]")
+print("Where X, Y, Z, W are the 4 antenna parameters")
