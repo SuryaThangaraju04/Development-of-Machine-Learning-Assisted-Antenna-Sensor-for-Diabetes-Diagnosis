@@ -1,0 +1,387 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.neural_network import MLPRegressor
+from sklearn.multioutput import MultiOutputRegressor
+import joblib
+import warnings
+
+warnings.filterwarnings('ignore')
+
+
+class ReverseAntennaML:
+    def __init__(self):
+        self.models = {}
+        self.scalers = {}
+        self.raw_data = None
+        self.processed_data = None
+        self.feature_names = ['min_s11', 'freq_of_min', 'bandwidth', 'target_frequency']
+        self.parameter_names = ['num_iterations', 'max_size', 'feedline_width', 'feedline_length']
+        self.performance_threshold = -10.0
+
+    def load_excel_data(self, excel_file_path: str, sheet_name: str = None) -> bool:
+        print("=" * 60)
+        print("STEP 1: LOADING EXCEL DATA")
+        print("=" * 60)
+        try:
+            self.raw_data = pd.read_excel(excel_file_path, sheet_name=sheet_name) if sheet_name else pd.read_excel(excel_file_path)
+            print("Loaded Excel file")
+            print(f"Data shape: {self.raw_data.shape}")
+            print(f"Columns: {list(self.raw_data.columns)}")
+            print("\nFirst 5 rows:")
+            print(self.raw_data.head())
+            return True
+        except Exception as e:
+            print(f"Error loading Excel file: {e}")
+            return False
+
+    def parse_column_parameters(self, column_name: str) -> dict:
+        params = {'num_iterations': 0, 'max_size': 0, 'feedline_width': 0, 'feedline_length': 0}
+        try:
+            parts = column_name.lower().split('_')
+            for part in parts:
+                if 'iter' in part:
+                    params['num_iterations'] = float(part.replace('iter', ''))
+                elif 'size' in part:
+                    params['max_size'] = float(part.replace('size', ''))
+                elif 'fwidth' in part or 'width' in part:
+                    params['feedline_width'] = float(part.replace('fwidth', '').replace('width', ''))
+                elif 'flength' in part or 'length' in part:
+                    params['feedline_length'] = float(part.replace('flength', '').replace('length', ''))
+        except:
+            print(f"Could not parse parameters from column: {column_name}")
+        return params
+
+    def extract_s11_features(self, frequency_column: str, s11_column: str,
+                             frequencies: np.array, s11_values: np.array) -> list:
+        good_indices = s11_values < self.performance_threshold
+        if not np.any(good_indices):
+            return None
+        good_frequencies = frequencies[good_indices]
+        good_s11_values = s11_values[good_indices]
+        min_idx = np.argmin(good_s11_values)
+        min_s11 = good_s11_values[min_idx]
+        freq_of_min = good_frequencies[min_idx]
+        bandwidth = good_frequencies.max() - good_frequencies.min()
+        resonances = self.find_resonances(frequencies, s11_values)
+
+        features_list = []
+        for resonance in resonances:
+            if resonance['s11'] < self.performance_threshold:
+                features = {
+                    'min_s11': resonance['s11'],
+                    'freq_of_min': resonance['frequency'],
+                    'bandwidth': self.calculate_bandwidth_around_frequency(frequencies, s11_values, resonance['frequency']),
+                    'target_frequency': resonance['frequency']
+                }
+                features_list.append(features)
+        return features_list if features_list else None
+
+    def find_resonances(self, frequencies: np.array, s11_values: np.array, window_size: int = 5) -> list:
+        resonances = []
+        for i in range(window_size, len(s11_values) - window_size):
+            window = s11_values[i - window_size:i + window_size + 1]
+            if s11_values[i] == np.min(window) and s11_values[i] < self.performance_threshold:
+                resonances.append({'frequency': frequencies[i], 's11': s11_values[i], 'index': i})
+
+        filtered_resonances = []
+        for res in resonances:
+            is_duplicate = any(abs(res['frequency'] - existing['frequency']) < 0.5 for existing in filtered_resonances)
+            if not is_duplicate:
+                filtered_resonances.append(res)
+        return filtered_resonances
+
+    def calculate_bandwidth_around_frequency(self, frequencies: np.array, s11_values: np.array, center_freq: float) -> float:
+        center_idx = np.argmin(np.abs(frequencies - center_freq))
+        lower_idx = center_idx
+        upper_idx = center_idx
+        for i in range(center_idx, -1, -1):
+            if s11_values[i] > self.performance_threshold:
+                break
+            lower_idx = i
+        for i in range(center_idx, len(s11_values)):
+            if s11_values[i] > self.performance_threshold:
+                break
+            upper_idx = i
+        return frequencies[upper_idx] - frequencies[lower_idx]
+
+    def process_excel_data(self) -> pd.DataFrame:
+        print("\n" + "=" * 60)
+        print("STEP 2: PROCESSING DATA FOR ML TRAINING")
+        print("=" * 60)
+        if self.raw_data is None:
+            print("No raw data loaded. Run load_excel_data() first.")
+            return None
+
+        frequency_col = self.raw_data.columns[0]
+        frequencies = self.raw_data[frequency_col].values
+        print(f"Frequency range: {frequencies.min():.1f} - {frequencies.max():.1f} GHz")
+        print(f"Processing {len(self.raw_data.columns) - 1} antenna configurations...")
+
+        training_data = []
+        for col in self.raw_data.columns[1:]:
+            print(f"\nProcessing column: {col}")
+            antenna_params = self.parse_column_parameters(col)
+            print(f"Parameters: {antenna_params}")
+            s11_values = self.raw_data[col].values
+            features_list = self.extract_s11_features(frequency_col, col, frequencies, s11_values)
+            if features_list:
+                for features in features_list:
+                    training_row = {**features, **antenna_params}
+                    training_data.append(training_row)
+                    print(f"Added training point: S11={features['min_s11']:.2f} dB at {features['freq_of_min']:.2f} GHz")
+            else:
+                print(f"No values below threshold ({self.performance_threshold} dB)")
+
+        self.processed_data = pd.DataFrame(training_data)
+        if len(self.processed_data) == 0:
+            print("No training data generated. Check S11 values and threshold.")
+            return None
+
+        print(f"\nGenerated {len(self.processed_data)} training samples")
+        print(f"Feature columns: {self.feature_names}")
+        print(f"Target columns: {self.parameter_names}")
+        print("\nTraining Data Summary:")
+        print(self.processed_data.describe())
+        return self.processed_data
+
+    def train_reverse_ml_model(self):
+        print("\n" + "=" * 60)
+        print("STEP 3: TRAINING REVERSE ML MODELS")
+        print("=" * 60)
+        if self.processed_data is None:
+            print("No processed data available. Run process_excel_data() first.")
+            return False
+
+        X = self.processed_data[self.feature_names]
+        y = self.processed_data[self.parameter_names]
+        print(f"Training data shape: X{X.shape}, y{y.shape}")
+
+        feature_scaler = StandardScaler()
+        X_scaled = feature_scaler.fit_transform(X)
+        self.scalers['features'] = feature_scaler
+
+        target_scaler = MinMaxScaler()
+        y_scaled = target_scaler.fit_transform(y)
+        self.scalers['targets'] = target_scaler
+
+        X_train, X_test, y_train, y_test = train_test_split(X_scaled, y_scaled, test_size=0.2, random_state=42)
+        print(f"Training set: {X_train.shape}")
+        print(f"Test set: {X_test.shape}")
+
+        models_to_try = {
+            'RandomForest': MultiOutputRegressor(RandomForestRegressor(n_estimators=100, random_state=42)),
+            'GradientBoosting': MultiOutputRegressor(GradientBoostingRegressor(n_estimators=100, random_state=42)),
+            'MLP': MLPRegressor(hidden_layer_sizes=(100, 50, 25), max_iter=1000, random_state=42)
+        }
+
+        best_model = None
+        best_score = float('-inf')
+
+        for model_name, model in models_to_try.items():
+            print(f"\nTraining {model_name}...")
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            r2 = r2_score(y_test, y_pred, multioutput='uniform_average')
+            mse = mean_squared_error(y_test, y_pred, multioutput='uniform_average')
+            print(f"R2: {r2:.4f}")
+            print(f"MSE: {mse:.4f}")
+
+            y_test_orig = target_scaler.inverse_transform(y_test)
+            y_pred_orig = target_scaler.inverse_transform(y_pred)
+            for i, param_name in enumerate(self.parameter_names):
+                param_r2 = r2_score(y_test_orig[:, i], y_pred_orig[:, i])
+                param_mae = mean_absolute_error(y_test_orig[:, i], y_pred_orig[:, i])
+                print(f"{param_name}: R2={param_r2:.3f}, MAE={param_mae:.3f}")
+
+            if r2 > best_score:
+                best_score = r2
+                best_model = model
+
+        self.models['parameter_predictor'] = best_model
+        print(f"\nBest model: {type(best_model).__name__} (R2 = {best_score:.4f})")
+        return True
+
+    def predict_optimal_parameters(self, target_s11: float, target_frequency: float, bandwidth: float = 0.5) -> dict:
+        print("\nPREDICTING OPTIMAL PARAMETERS")
+        print(f"Target S11: {target_s11:.1f} dB at {target_frequency:.1f} GHz")
+        if 'parameter_predictor' not in self.models:
+            print("No trained model available. Run train_reverse_ml_model() first.")
+            return None
+
+        input_features = np.array([[target_s11, target_frequency, bandwidth, target_frequency]])
+        input_scaled = self.scalers['features'].transform(input_features)
+        predicted_scaled = self.models['parameter_predictor'].predict(input_scaled)
+        predicted_params = self.scalers['targets'].inverse_transform(predicted_scaled)[0]
+
+        result = {}
+        for i, param_name in enumerate(self.parameter_names):
+            result[param_name] = predicted_params[i]
+
+        print("Predicted parameters:")
+        for param, value in result.items():
+            print(f"   {param}: {value:.3f}")
+        return result
+
+    def optimize_for_dual_band(self, freq1: float = 2.5, freq2: float = 7.5, target_s11: float = -20.0) -> dict:
+        print("\nDUAL-BAND OPTIMIZATION")
+        print(f"Target frequencies: {freq1} GHz and {freq2} GHz")
+        print(f"Target S11: {target_s11} dB")
+
+        params1 = self.predict_optimal_parameters(target_s11, freq1)
+        params2 = self.predict_optimal_parameters(target_s11, freq2)
+        if params1 is None or params2 is None:
+            return None
+
+        optimal_params = {}
+        for param in self.parameter_names:
+            optimal_params[param] = (params1[param] + params2[param]) / 2
+
+        print("\nDual-band optimal parameters:")
+        for param, value in optimal_params.items():
+            print(f"   {param}: {value:.3f}")
+
+        param_diff = {}
+        total_diff = 0
+        for param in self.parameter_names:
+            diff = abs(params1[param] - params2[param])
+            param_diff[param] = diff
+            total_diff += diff
+        confidence = max(0, 1 - total_diff / len(self.parameter_names) / 10)
+
+        result = {
+            'optimal_parameters': optimal_params,
+            'freq1_parameters': params1,
+            'freq2_parameters': params2,
+            'parameter_differences': param_diff,
+            'confidence_score': confidence
+        }
+
+        print(f"\nConfidence Score: {confidence:.3f}")
+        return result
+
+    def plot_parameter_analysis(self):
+        if self.processed_data is None:
+            print("No processed data available for plotting.")
+            return
+
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        axes = axes.flatten()
+        for i, param in enumerate(self.parameter_names):
+            if i >= 4:
+                break
+            scatter = axes[i].scatter(
+                self.processed_data[param],
+                self.processed_data['min_s11'],
+                c=self.processed_data['freq_of_min'],
+                cmap='viridis',
+                alpha=0.7
+            )
+            axes[i].set_xlabel(param)
+            axes[i].set_ylabel('Min S11 (dB)')
+            axes[i].set_title(f'{param} vs S11 Performance')
+            axes[i].grid(True, alpha=0.3)
+            plt.colorbar(scatter, ax=axes[i], label='Frequency (GHz)')
+        plt.tight_layout()
+        plt.show()
+
+    def save_model_and_results(self, output_dir: str = "./"):
+        print("\nSAVING MODELS AND RESULTS...")
+        if self.processed_data is not None:
+            self.processed_data.to_csv(f"{output_dir}reverse_ml_training_data.csv", index=False)
+            print(f"Saved training data to {output_dir}reverse_ml_training_data.csv")
+        if self.models:
+            model_data = {
+                'models': self.models,
+                'scalers': self.scalers,
+                'feature_names': self.feature_names,
+                'parameter_names': self.parameter_names,
+                'performance_threshold': self.performance_threshold
+            }
+            joblib.dump(model_data, f"{output_dir}reverse_antenna_ml_model.pkl")
+            print(f"Saved ML models to {output_dir}reverse_antenna_ml_model.pkl")
+        print("Save complete.")
+
+    def generate_sample_excel_format(self, filename: str = "sample_antenna_data.xlsx"):
+        print(f"\nGENERATING SAMPLE EXCEL FORMAT: {filename}")
+        frequencies = np.linspace(1, 8, 100)
+        configs = [
+            {'iter': 3, 'size': 20, 'fwidth': 1.5, 'flength': 8},
+            {'iter': 5, 'size': 25, 'fwidth': 2.0, 'flength': 10},
+            {'iter': 4, 'size': 22, 'fwidth': 1.8, 'flength': 9},
+            {'iter': 6, 'size': 28, 'fwidth': 2.2, 'flength': 12}
+        ]
+
+        data = {'Frequency_GHz': frequencies}
+        for config in configs:
+            col_name = f"S11_iter{config['iter']}_size{config['size']}_fwidth{config['fwidth']}_flength{config['flength']}"
+            s11_values = []
+            for freq in frequencies:
+                s11 = -5
+                if 2.0 <= freq <= 3.0:
+                    s11 += -20 * np.exp(-((freq - 2.5) ** 2) / 0.1)
+                resonance_freq = 7.0 + config['size'] * 0.02
+                if 6.5 <= freq <= 8.5:
+                    s11 += -15 * np.exp(-((freq - resonance_freq) ** 2) / 0.2)
+                s11 += np.random.normal(0, 0.5)
+                s11_values.append(s11)
+            data[col_name] = s11_values
+
+        df = pd.DataFrame(data)
+        df.to_excel(filename, index=False)
+        print(f"Sample Excel file created: {filename}")
+        print("Format: Rows=frequencies, Columns=S11_iter[X]_size[Y]_fwidth[Z]_flength[W]")
+
+
+def run_reverse_ml_workflow(excel_file_path: str):
+    print("REVERSE ML WORKFLOW: S11 → OPTIMAL PARAMETERS")
+    print("Goal: Predict antenna parameters from desired S11 performance")
+    print("=" * 70)
+
+    reverse_ml = ReverseAntennaML()
+    try:
+        if not reverse_ml.load_excel_data(excel_file_path):
+            return None
+        if reverse_ml.process_excel_data() is None:
+            return None
+        if not reverse_ml.train_reverse_ml_model():
+            return None
+
+        print("\n" + "=" * 60)
+        print("STEP 4: TESTING PREDICTIONS")
+        print("=" * 60)
+        reverse_ml.predict_optimal_parameters(target_s11=-25.0, target_frequency=2.5, bandwidth=0.5)
+        reverse_ml.optimize_for_dual_band(freq1=2.5, freq2=7.5, target_s11=-20.0)
+        reverse_ml.save_model_and_results()
+
+        print("\n" + "=" * 70)
+        print("REVERSE ML WORKFLOW COMPLETE")
+        print("Use predict_optimal_parameters() for new designs")
+        print("=" * 70)
+        return reverse_ml
+    except Exception as e:
+        print(f"Error in workflow: {e}")
+        return None
+
+
+if __name__ == "__main__":
+    reverse_ml = ReverseAntennaML()
+    reverse_ml.generate_sample_excel_format("sample_antenna_data.xlsx")
+
+    print("\n" + "=" * 50)
+    print("TESTING WITH SAMPLE DATA")
+    print("=" * 50)
+
+    trained_model = run_reverse_ml_workflow("sample_antenna_data.xlsx")
+    if trained_model:
+        print("\nADDITIONAL TESTING:")
+        trained_model.predict_optimal_parameters(-30.0, 2.5)
+        trained_model.predict_optimal_parameters(-25.0, 7.5)
+        print("\nNext steps:")
+        print("1. Replace sample data with HFSS results")
+        print("2. Update column naming format if needed")
+        print("3. Use the model to optimize antenna designs")
