@@ -1,0 +1,155 @@
+import pandas as pd
+import numpy as np
+import os
+from sklearn.model_selection import train_test_split
+
+def generate_base_dataset():
+    np.random.seed(42)
+    
+    dual_band_configs = [
+        {'A': 9.8, 'B': 6, 'C': 15.0, 'D': 0.8, 'E': 1.0, 'F': 1.0},
+        {'A': 9.7, 'B': 6, 'C': 15.2, 'D': 0.78, 'E': 1.0, 'F': 1.0},
+        {'A': 9.9, 'B': 6, 'C': 14.8, 'D': 0.82, 'E': 1.0, 'F': 1.0},
+        {'A': 10.0, 'B': 5, 'C': 14.5, 'D': 0.85, 'E': 1.0, 'F': 0.9},
+        {'A': 9.6, 'B': 6, 'C': 15.5, 'D': 0.75, 'E': 1.0, 'F': 1.1},
+    ]
+    
+    single_band_configs = [
+        {'A': 11.0, 'B': 4, 'C': 12.0, 'D': 1.2, 'E': 1.2, 'F': 0.8},
+        {'A': 8.5, 'B': 3, 'C': 18.0, 'D': 0.6, 'E': 0.8, 'F': 1.2},
+    ]
+    
+    dataset = []
+    
+    for config in dual_band_configs:
+        for _ in range(20):
+            sample = create_sample(config, is_dual_band=True)
+            dataset.append(sample)
+    
+    for config in single_band_configs:
+        for _ in range(10):
+            sample = create_sample(config, is_dual_band=False)
+            dataset.append(sample)
+    
+    return pd.DataFrame(dataset)
+
+def create_sample(base_config, is_dual_band=True):
+    sample = {
+        'A': base_config['A'] + np.random.normal(0, 0.1),
+        'B': base_config['B'],
+        'C': base_config['C'] + np.random.normal(0, 0.2),
+        'D': base_config['D'] + np.random.normal(0, 0.05),
+        'E': base_config['E'] + np.random.normal(0, 0.05),
+        'F': base_config['F'] + np.random.normal(0, 0.05),
+    }
+    
+    sample['A'] = np.clip(sample['A'], 8.0, 12.0)
+    sample['C'] = np.clip(sample['C'], 10.0, 20.0)
+    sample['D'] = np.clip(sample['D'], 0.5, 1.5)
+    sample['E'] = np.clip(sample['E'], 0.5, 1.5)
+    sample['F'] = np.clip(sample['F'], 0.5, 1.5)
+    
+    if is_dual_band:
+        sample['freq1_GHz'] = 2.5 + np.random.normal(0, 0.02)
+        sample['freq2_GHz'] = 7.5 + np.random.normal(0, 0.05)
+        sample['s11_at_freq1_dB'] = np.random.uniform(-18, -12)
+        sample['s11_at_freq2_dB'] = np.random.uniform(-16, -11)
+        sample['bw1_GHz'] = 0.25 + np.random.normal(0, 0.02)
+        sample['bw2_GHz'] = 0.35 + np.random.normal(0, 0.03)
+        sample['antenna_type'] = 'dual-band'
+    else:
+        sample['freq1_GHz'] = 2.5 + np.random.normal(0, 0.05)
+        sample['freq2_GHz'] = 7.5 + np.random.normal(0, 0.1)
+        sample['s11_at_freq1_dB'] = np.random.uniform(-15, -10)
+        sample['s11_at_freq2_dB'] = np.random.uniform(-8, -3)
+        sample['bw1_GHz'] = 0.20 + np.random.normal(0, 0.03)
+        sample['bw2_GHz'] = 0.10 + np.random.normal(0, 0.02)
+        sample['antenna_type'] = 'single-band'
+    
+    return sample
+
+def augment_dataset(df, target_size=350):
+    current_size = len(df)
+    if current_size >= target_size:
+        return df
+    
+    augmented_samples = []
+    dual_band_df = df[df['antenna_type'] == 'dual-band']
+    
+    while len(df) + len(augmented_samples) < target_size:
+        base_sample = dual_band_df.sample(n=1).iloc[0].to_dict()
+        new_sample = base_sample.copy()
+        
+        for param in ['A', 'C', 'D', 'E', 'F']:
+            variation = np.random.uniform(0.95, 1.05)
+            new_sample[param] = base_sample[param] * variation
+        
+        new_sample['s11_at_freq1_dB'] += np.random.normal(0, 1)
+        new_sample['s11_at_freq2_dB'] += np.random.normal(0, 1)
+        new_sample['bw1_GHz'] += np.random.normal(0, 0.01)
+        new_sample['bw2_GHz'] += np.random.normal(0, 0.01)
+        
+        new_sample['s11_at_freq1_dB'] = np.clip(new_sample['s11_at_freq1_dB'], -20, -10)
+        new_sample['s11_at_freq2_dB'] = np.clip(new_sample['s11_at_freq2_dB'], -20, -10)
+        
+        augmented_samples.append(new_sample)
+    
+    augmented_df = pd.DataFrame(augmented_samples)
+    final_df = pd.concat([df, augmented_df], ignore_index=True)
+    
+    return final_df
+
+def prepare_data_splits(df):
+    feature_columns = ['freq1_GHz', 'freq2_GHz', 's11_at_freq1_dB', 
+                       's11_at_freq2_dB', 'bw1_GHz', 'bw2_GHz']
+    target_columns = ['A', 'B', 'C', 'D', 'E', 'F']
+    
+    X = df[feature_columns]
+    y = df[target_columns]
+    
+    X_temp, X_test, y_temp, y_test = train_test_split(
+        X, y, test_size=0.15, random_state=42, stratify=df['antenna_type']
+    )
+    
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_temp, y_temp, test_size=0.176, random_state=42
+    )
+    
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
+def main():
+    print("Generating base dataset from simulation results...")
+    base_df = generate_base_dataset()
+    print(f"Base dataset: {len(base_df)} samples")
+    
+    print("\nAugmenting dataset...")
+    augmented_df = augment_dataset(base_df, target_size=350)
+    print(f"Augmented dataset: {len(augmented_df)} samples")
+    
+    print("\nDataset Statistics:")
+    print(f"Dual-band samples: {(augmented_df['antenna_type'] == 'dual-band').sum()}")
+    print(f"Single-band samples: {(augmented_df['antenna_type'] == 'single-band').sum()}")
+    
+    os.makedirs('data', exist_ok=True)
+    
+    augmented_df.to_csv('data/antenna_dataset.csv', index=False)
+    print("\nDataset saved to 'data/antenna_dataset.csv'")
+    
+    X_train, X_val, X_test, y_train, y_val, y_test = prepare_data_splits(augmented_df)
+    
+    X_train.to_csv('data/X_train.csv', index=False)
+    X_val.to_csv('data/X_val.csv', index=False)
+    X_test.to_csv('data/X_test.csv', index=False)
+    y_train.to_csv('data/y_train.csv', index=False)
+    y_val.to_csv('data/y_val.csv', index=False)
+    y_test.to_csv('data/y_test.csv', index=False)
+    
+    print("\nData splits saved:")
+    print(f"Training set: {len(X_train)} samples")
+    print(f"Validation set: {len(X_val)} samples")
+    print(f"Test set: {len(X_test)} samples")
+    
+    return augmented_df
+
+if __name__ == "__main__":
+    df = main()
