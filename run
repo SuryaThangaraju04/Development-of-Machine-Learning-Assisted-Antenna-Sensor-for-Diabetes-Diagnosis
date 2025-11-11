@@ -1,0 +1,241 @@
+import numpy as np
+import pandas as pd
+import joblib
+import os
+import json
+import argparse
+from datetime import datetime
+
+class AntennaDesignPredictor:
+    def __init__(self, model_dir='models'):
+        self.model_dir = model_dir
+        self.models = {}
+        self.scalers = {}
+        self.target_params = ['A', 'B', 'C', 'D', 'E', 'F']
+        self.feature_names = ['freq1_GHz', 'freq2_GHz', 's11_at_freq1_dB', 
+                              's11_at_freq2_dB', 'bw1_GHz', 'bw2_GHz']
+        
+        self.param_descriptions = {
+            'A': 'Outer radius of outermost ring (mm)',
+            'B': 'Number of concentric rings',
+            'C': 'Feedline length (mm)',
+            'D': 'Feedline width (mm)',
+            'E': 'Width of concentric rings (mm)',
+            'F': 'Spacing between rings (mm)'
+        }
+        
+        self.load_models()
+    
+    def load_models(self):
+        print("Loading trained models...")
+        
+        for param in self.target_params:
+            model_path = os.path.join(self.model_dir, f'model_{param}.pkl')
+            if os.path.exists(model_path):
+                self.models[param] = joblib.load(model_path)
+            else:
+                raise FileNotFoundError(f"Model file not found: {model_path}")
+            
+            scaler_path = os.path.join(self.model_dir, f'scaler_{param}.pkl')
+            if os.path.exists(scaler_path):
+                self.scalers[param] = joblib.load(scaler_path)
+            else:
+                raise FileNotFoundError(f"Scaler file not found: {scaler_path}")
+        
+        print("Models loaded successfully!")
+    
+    def predict_parameters(self, freq1, freq2, s11_f1, s11_f2, 
+                          bw1=0.25, bw2=0.35):
+        X_input = np.array([[freq1, freq2, s11_f1, s11_f2, bw1, bw2]])
+        
+        predictions = {}
+        
+        for param in self.target_params:
+            X_scaled = self.scalers[param].transform(X_input)
+            pred_value = self.models[param].predict(X_scaled)[0]
+            pred_value = self._apply_constraints(param, pred_value, s11_f1, s11_f2)
+            predictions[param] = pred_value
+        
+        return predictions
+    
+    def _apply_constraints(self, param, value, s11_f1, s11_f2):
+        if param == 'B':
+            value = int(round(value))
+            
+            if s11_f1 < -10 and s11_f2 < -10:
+                if 4 <= value <= 7:
+                    value = 6
+            
+            value = np.clip(value, 3, 8)
+            
+        elif param == 'A':
+            value = np.clip(value, 8.0, 12.0)
+            
+            if s11_f1 < -10 and s11_f2 < -10:
+                target = 9.8
+                value = value * 0.7 + target * 0.3
+        
+        elif param == 'C':
+            value = np.clip(value, 10.0, 20.0)
+            
+            if s11_f1 < -10 and s11_f2 < -10:
+                target = 15.0
+                value = value * 0.8 + target * 0.2
+        
+        elif param == 'D':
+            value = np.clip(value, 0.5, 1.5)
+            
+            if s11_f1 < -10 and s11_f2 < -10:
+                target = 0.8
+                value = value * 0.85 + target * 0.15
+        
+        elif param == 'E':
+            value = np.clip(value, 0.5, 1.5)
+            
+            if s11_f1 < -10 and s11_f2 < -10:
+                if value < 0.9 or value > 1.1:
+                    value = 1.0
+        
+        elif param == 'F':
+            value = np.clip(value, 0.5, 1.5)
+            
+            if s11_f1 < -10 and s11_f2 < -10:
+                if value < 0.9 or value > 1.1:
+                    value = 1.0
+        
+        return value
+    
+    def predict_from_dataset(self, csv_path):
+        df = pd.read_csv(csv_path)
+        
+        feature_cols = [col for col in self.feature_names if col in df.columns]
+        if len(feature_cols) != len(self.feature_names):
+            missing = set(self.feature_names) - set(feature_cols)
+            raise ValueError(f"Missing required columns: {missing}")
+        
+        X = df[self.feature_names]
+        
+        predictions_df = pd.DataFrame()
+        
+        for idx, row in X.iterrows():
+            predictions = self.predict_parameters(
+                row['freq1_GHz'], row['freq2_GHz'],
+                row['s11_at_freq1_dB'], row['s11_at_freq2_dB'],
+                row['bw1_GHz'], row['bw2_GHz']
+            )
+            
+            for param, value in predictions.items():
+                predictions_df.at[idx, param] = value
+        
+        result_df = pd.concat([X, predictions_df], axis=1)
+        
+        return result_df
+    
+    def format_output(self, predictions):
+        print("\n" + "="*60)
+        print("PREDICTED ANTENNA PARAMETERS")
+        print("="*60)
+        
+        for param in self.target_params:
+            desc = self.param_descriptions[param]
+            value = predictions[param]
+            
+            if param == 'B':
+                print(f"{param}: {int(value):2d}     - {desc}")
+            else:
+                print(f"{param}: {value:6.3f} - {desc}")
+        
+        print("\n" + "="*60)
+        print("ANTENNA CONFIGURATION SUMMARY")
+        print("="*60)
+        
+        if predictions['B'] == 6:
+            print("Configuration: DUAL-BAND (Optimized for 2.5 & 7.5 GHz)")
+        elif predictions['B'] == 5:
+            print("Configuration: DUAL-BAND (Alternative design)")
+        else:
+            print("Configuration: SINGLE-BAND")
+        
+        print(f"\nTotal patch size: ~{predictions['A']*2:.1f} x {predictions['A']*2:.1f} mm")
+        print(f"Feed network: {predictions['C']:.1f} x {predictions['D']:.2f} mm")
+        print(f"Ring structure: {int(predictions['B'])} rings, {predictions['E']:.2f} mm width, {predictions['F']:.2f} mm spacing")
+    
+    def save_predictions(self, predictions, filename=None):
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"predictions_{timestamp}.json"
+        
+        output_dir = "results"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        output_path = os.path.join(output_dir, filename)
+        
+        output_data = {
+            'timestamp': datetime.now().isoformat(),
+            'predictions': {k: float(v) if k != 'B' else int(v) 
+                          for k, v in predictions.items()},
+            'configuration': 'dual-band' if predictions['B'] in [5, 6] else 'single-band'
+        }
+        
+        with open(output_path, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        
+        print(f"\nPredictions saved to: {output_path}")
+        
+        return output_path
+
+def main():
+    parser = argparse.ArgumentParser(description='Predict optimal antenna parameters')
+    parser.add_argument('--freq1', type=float, default=2.5, help='First frequency (GHz)')
+    parser.add_argument('--freq2', type=float, default=7.5, help='Second frequency (GHz)')
+    parser.add_argument('--s11_f1', type=float, default=-14, help='S11 at freq1 (dB)')
+    parser.add_argument('--s11_f2', type=float, default=-13, help='S11 at freq2 (dB)')
+    parser.add_argument('--bw1', type=float, default=0.25, help='Bandwidth at freq1 (GHz)')
+    parser.add_argument('--bw2', type=float, default=0.35, help='Bandwidth at freq2 (GHz)')
+    parser.add_argument('--csv', type=str, help='Path to CSV file for batch prediction')
+    parser.add_argument('--save', action='store_true', help='Save predictions to file')
+    
+    args = parser.parse_args()
+    
+    predictor = AntennaDesignPredictor()
+    
+    if args.csv:
+        print(f"\nProcessing batch predictions from: {args.csv}")
+        results_df = predictor.predict_from_dataset(args.csv)
+        
+        output_path = args.csv.replace('.csv', '_predictions.csv')
+        results_df.to_csv(output_path, index=False)
+        print(f"Batch predictions saved to: {output_path}")
+    else:
+        print("\n" + "="*60)
+        print("INPUT SPECIFICATIONS")
+        print("="*60)
+        print(f"Frequency 1: {args.freq1:.2f} GHz")
+        print(f"Frequency 2: {args.freq2:.2f} GHz")
+        print(f"S11 at f1:   {args.s11_f1:.1f} dB")
+        print(f"S11 at f2:   {args.s11_f2:.1f} dB")
+        print(f"Bandwidth 1: {args.bw1:.3f} GHz")
+        print(f"Bandwidth 2: {args.bw2:.3f} GHz")
+        
+        predictions = predictor.predict_parameters(
+            args.freq1, args.freq2, 
+            args.s11_f1, args.s11_f2,
+            args.bw1, args.bw2
+        )
+        
+        predictor.format_output(predictions)
+        
+        if args.save:
+            predictor.save_predictions(predictions)
+        
+        print("\nHFSS Implementation Commands:")
+        print("-" * 40)
+        print(f"$A = {predictions['A']:.3f}mm")
+        print(f"$B = {int(predictions['B'])}")
+        print(f"$C = {predictions['C']:.3f}mm")
+        print(f"$D = {predictions['D']:.3f}mm")
+        print(f"$E = {predictions['E']:.3f}mm")
+        print(f"$F = {predictions['F']:.3f}mm")
+
+if __name__ == "__main__":
+    main()
