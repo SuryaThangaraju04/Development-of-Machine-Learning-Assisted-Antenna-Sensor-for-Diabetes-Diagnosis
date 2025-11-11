@@ -5,9 +5,15 @@ from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import r2_score, mean_absolute_error
 import joblib
 import os
+import warnings
 
 
 class AntennaOptimizer:
+    """
+    Antenna parameter optimizer using machine learning.
+    Trains models to predict optimal antenna dimensions from frequency specifications.
+    """
+
     def __init__(self):
         self.models = {}
         self.scalers = {}
@@ -17,6 +23,15 @@ class AntennaOptimizer:
         self.target_params = ['A', 'B', 'C', 'D', 'E', 'F']
 
     def create_model(self, param_name):
+        """
+        Create a gradient boosting model with parameter-specific hyperparameters.
+
+        Args:
+            param_name: Name of the parameter to optimize ('A' through 'F')
+
+        Returns:
+            Configured GradientBoostingRegressor model
+        """
         base_estimators = {'A': 80, 'B': 40, 'C': 90, 'D': 70, 'E': 60, 'F': 60}
         base_depth = {'A': 3, 'B': 2, 'C': 3, 'D': 3, 'E': 2, 'F': 2}
 
@@ -29,6 +44,17 @@ class AntennaOptimizer:
         )
 
     def calculate_weights(self, X, y, param):
+        """
+        Calculate sample weights to emphasize dual-band performance.
+
+        Args:
+            X: Input features DataFrame
+            y: Target parameter values
+            param: Parameter name
+
+        Returns:
+            Array of sample weights
+        """
         dual_mask = (X['s11_at_freq1_dB'].values < -12) & (X['s11_at_freq2_dB'].values < -11)
         weights = np.ones(len(y))
         weights[dual_mask] = 1.3
@@ -44,6 +70,13 @@ class AntennaOptimizer:
         return weights / weights.mean()
 
     def train_models(self, X_train, y_train):
+        """
+        Train all parameter models with sample weighting.
+
+        Args:
+            X_train: Training features DataFrame
+            y_train: Training targets DataFrame
+        """
         print("Optimizing antenna parameters...")
 
         for param in self.target_params:
@@ -79,6 +112,12 @@ class AntennaOptimizer:
             print(f"  {param}: R²={r2:.3f}, MAE={mae:.3f}")
 
     def save_models(self, model_dir='models'):
+        """
+        Save trained models, scalers, and convergence parameters.
+
+        Args:
+            model_dir: Directory to save models
+        """
         os.makedirs(model_dir, exist_ok=True)
 
         for param in self.target_params:
@@ -89,15 +128,147 @@ class AntennaOptimizer:
         print(f"Models saved to {model_dir}/")
 
 
+class AntennaPredictor:
+    """
+    Antenna parameter predictor using trained models.
+    Predicts optimal antenna dimensions from frequency specifications.
+    """
+
+    def __init__(self, model_dir='models'):
+        self.models = {}
+        self.scalers = {}
+        self.convergence_params = {}
+        self.feature_names = ['freq1_GHz', 'freq2_GHz', 's11_at_freq1_dB',
+                              's11_at_freq2_dB', 'bw1_GHz', 'bw2_GHz']
+        self.target_params = ['A', 'B', 'C', 'D', 'E', 'F']
+        self.load_models(model_dir)
+
+    def load_models(self, model_dir):
+        """
+        Load trained models from disk.
+
+        Args:
+            model_dir: Directory containing saved models
+        """
+        print("Loading trained models...")
+        for param in self.target_params:
+            self.models[param] = joblib.load(f'{model_dir}/model_{param}.pkl')
+            self.scalers[param] = joblib.load(f'{model_dir}/scaler_{param}.pkl')
+
+        self.convergence_params = joblib.load(f'{model_dir}/convergence.pkl')
+        print("Models loaded successfully!")
+
+    def predict_parameters(self, freq1, freq2, s11_f1, s11_f2, bw1, bw2):
+        """
+        Predict antenna parameters from specifications.
+
+        Args:
+            freq1: First frequency in GHz
+            freq2: Second frequency in GHz
+            s11_f1: S11 at first frequency in dB
+            s11_f2: S11 at second frequency in dB
+            bw1: Bandwidth at first frequency in GHz
+            bw2: Bandwidth at second frequency in GHz
+
+        Returns:
+            Dictionary of predicted parameters
+        """
+        # Create DataFrame with proper feature names
+        input_data = pd.DataFrame([[freq1, freq2, s11_f1, s11_f2, bw1, bw2]],
+                                  columns=self.feature_names)
+
+        predictions = {}
+
+        for param in self.target_params:
+            X_scaled = self.scalers[param].transform(input_data)
+            pred = self.models[param].predict(X_scaled)[0]
+
+            if param == 'B':
+                pred = int(np.round(pred))
+
+            predictions[param] = pred
+
+        return predictions
+
+    def print_results(self, predictions, freq1, freq2, s11_f1, s11_f2, bw1, bw2):
+        """
+        Display prediction results in formatted output.
+
+        Args:
+            predictions: Dictionary of predicted parameters
+            freq1, freq2: Frequencies in GHz
+            s11_f1, s11_f2: S11 values in dB
+            bw1, bw2: Bandwidths in GHz
+        """
+        print("\n" + "=" * 60)
+        print("INPUT SPECIFICATIONS")
+        print("=" * 60)
+        print(f"Frequency 1: {freq1:.2f} GHz")
+        print(f"Frequency 2: {freq2:.2f} GHz")
+        print(f"S11 at f1:   {s11_f1:.1f} dB")
+        print(f"S11 at f2:   {s11_f2:.1f} dB")
+        print(f"Bandwidth 1: {bw1:.3f} GHz")
+        print(f"Bandwidth 2: {bw2:.3f} GHz")
+
+        print("\n" + "=" * 60)
+        print("PREDICTED ANTENNA PARAMETERS")
+        print("=" * 60)
+
+        param_descriptions = {
+            'A': 'Outer radius of outermost ring (mm)',
+            'B': 'Number of concentric rings',
+            'C': 'Feedline length (mm)',
+            'D': 'Feedline width (mm)',
+            'E': 'Width of concentric rings (mm)',
+            'F': 'Spacing between rings (mm)'
+        }
+
+        for param in self.target_params:
+            if param == 'B':
+                print(f"{param}: {predictions[param]:2d}     - {param_descriptions[param]}")
+            else:
+                print(f"{param}: {predictions[param]:6.3f} - {param_descriptions[param]}")
+
+        print("\n" + "=" * 60)
+        print("ANTENNA CONFIGURATION SUMMARY")
+        print("=" * 60)
+
+        total_size = predictions['A'] * 2
+        print(f"Configuration: DUAL-BAND (Optimized for {freq1} & {freq2} GHz)")
+        print(f"Total patch size: ~{total_size:.1f} x {total_size:.1f} mm")
+        print(f"Feed network: {predictions['C']:.1f} x {predictions['D']:.2f} mm")
+        print(
+            f"Ring structure: {predictions['B']} rings, {predictions['E']:.2f} mm width, {predictions['F']:.2f} mm spacing")
+
+        print("\nHFSS Implementation Commands:")
+        print("-" * 40)
+        for param in self.target_params:
+            if param == 'B':
+                print(f"${param} = {predictions[param]}")
+            else:
+                print(f"${param} = {predictions[param]:.3f}mm")
+
+
 def main():
-    X_train = pd.read_csv('data/X_train.csv')
-    y_train = pd.read_csv('data/y_train.csv')
+    """
+    Main execution function for antenna optimization and prediction.
+    """
+    # Initialize predictor
+    predictor = AntennaPredictor()
 
-    optimizer = AntennaOptimizer()
-    optimizer.train_models(X_train, y_train)
-    optimizer.save_models()
+    # Input specifications
+    freq1 = 2.50  # GHz
+    freq2 = 7.50  # GHz
+    s11_f1 = -14.0  # dB
+    s11_f2 = -13.0  # dB
+    bw1 = 0.250  # GHz
+    bw2 = 0.350  # GHz
 
-    print("Training completed successfully")
+    # Predict parameters
+    predictions = predictor.predict_parameters(freq1, freq2, s11_f1, s11_f2, bw1, bw2)
+
+    # Display results
+    predictor.print_results(predictions, freq1, freq2, s11_f1, s11_f2, bw1, bw2)
 
 
 if __name__ == "__main__":
